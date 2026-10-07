@@ -34,6 +34,9 @@ Alert when one breaks (run as a yeet service so it outlives your shell):
 Check that Slack delivery works:
   yeet run github:yeet-src/apiwatch -- --test-alert --slack "#channel" [--name web-1]
 
+Kernel hooks (the default is fentry, or kprobes where fentry cannot attach):
+      --hooks kprobe    force the kprobe build of the taps (or --hooks fentry), for debugging
+
 Posting needs this host signed in (yeet login) and a Slack workspace connected
 at https://yeet.cx/settings. Reads plaintext HTTP/1.x and h2c on any port, and
 HTTPS from programs using OpenSSL (dynamic libssl, node, deno, bun) or rustls.
@@ -52,6 +55,7 @@ const portsArg = String(arg("ports", "") || "")
 const host = String(arg("name", "") || "this host");
 const channel = arg("slack", null);
 const json = Boolean(arg("json", false));
+const hooks = String(arg("hooks", "auto"));
 
 const out = (line) => console.log(line);
 const jlog = (obj) => console.log(JSON.stringify({ t: new Date().toISOString(), ...obj }));
@@ -94,6 +98,7 @@ async function boot() {
   const capture = await startCapture({
     base: import.meta.dirname,
     ports: portsArg,
+    hooks,
     onPid: (pid) => {
       if (!known(pid)) describe(pid);
     },
@@ -154,7 +159,7 @@ async function discover() {
   await capture.stop();
 
   if (json) {
-    out(JSON.stringify({ seconds, transactions: apis.transactions, served, called, unreadable: opaque, quiet, tls, errors: errors.slice(0, 5) }));
+    out(JSON.stringify({ seconds, hooks: capture.hooks, transactions: apis.transactions, served, called, unreadable: opaque, quiet, tls, errors: errors.slice(0, 5) }));
     return;
   }
 
@@ -191,7 +196,8 @@ async function discover() {
     out("\nListening, but no HTTP seen in the window");
     for (const q of quiet) out(`  port ${q.port} on ${q.address} (${q.reachableFrom})  ${q.process}`);
   }
-  out(`\nTLS read through: ${tls.filter((t) => t.state === "attached").map((t) => `${t.path} [${t.taps.join(",")}]`).join("; ") || "nothing"}`);
+  out(`\nKernel hooks: ${capture.hooks}${capture.hooksNote ? ` (${capture.hooksNote})` : ""}`);
+  out(`TLS read through: ${tls.filter((t) => t.state === "attached").map((t) => `${t.path} [${t.taps.join(",")}]`).join("; ") || "nothing"}`);
   if (errors.length) out(`Capture errors (${errors.length}): ${errors.slice(0, 3).join(" | ")}`);
 }
 
@@ -265,7 +271,7 @@ async function watch() {
   });
 
   const who = dryRun ? null : await yeet.whoami().catch(() => null);
-  jlog({ event: "start", host, channel, dryRun, signedIn: dryRun ? null : Boolean(who), ports: portsArg, window });
+  jlog({ event: "start", host, channel, dryRun, signedIn: dryRun ? null : Boolean(who), ports: portsArg, window, hooks: capture.hooks });
   if (!dryRun && !who) jlog({ event: "warning", message: "this host is not signed in; alerts will fail until `yeet login` succeeds" });
 
   setInterval(() => {
@@ -287,6 +293,7 @@ async function watch() {
       channel,
       dryRun,
       signedIn,
+      hooks: capture.hooks,
       transactions: apis.transactions,
       apis: list.map((r) => ({ kind: r.kind, name: r.name, port: r.port, requests: r.requests, errors5xx: r.errors5xx })),
       tls: capture.tlsStatus().filter((t) => t.state === "attached").map((t) => t.path),

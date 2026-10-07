@@ -2,7 +2,8 @@
  *
  * Three sources, one decoder:
  *
- *   socket tap   fentry on tcp_sendmsg/tcp_recvmsg (bin/socket.bpf.o):
+ *   socket tap   fentry on tcp_sendmsg/tcp_recvmsg (bin/socket.bpf.o),
+ *                or kprobes (bin/sock_kp.bpf.o) where fentry cannot attach:
  *                plaintext HTTP/1.x and h2c on any port, both ends of a
  *                loopback hop, plus the ClientHello of every TLS call
  *   TLS taps     uprobes on SSL_read/SSL_write (+ _ex) and rustls, attached
@@ -31,17 +32,34 @@ const flowKey = (f) => `${f.saddr}:${f.sport}>${f.daddr}:${f.dport}`;
 
 const BINARIES = `{ procs { pid exe stat { comm } maps { path inode dev_major dev_minor } } }`;
 
+/* Every tap is built twice from one source (bpf/include/hooks.h): with
+ * fentry, and with kprobes for kernels where fentry cannot attach (arm64
+ * before 6.4). Program and map names match, so only the file differs. */
+const BUILDS = {
+  fentry: { socket: "socket.bpf.o", openssl: "ssl.bpf.o", openssl_ex: "ssl_ex.bpf.o", rustls: "rustls.bpf.o" },
+  kprobe: { socket: "sock_kp.bpf.o", openssl: "ssl_kp.bpf.o", openssl_ex: "sslex_kp.bpf.o", rustls: "rustl_kp.bpf.o" },
+};
+export const HOOKS = ["auto", "fentry", "kprobe"];
+
+const message = (e) => (e && typeof e === "object" ? e.message ?? JSON.stringify(e) : String(e));
+/* What libbpf says when a program loaded but its hook would not attach,
+ * which is how an fentry fails on a kernel without direct calls. */
+const isAttachFailure = (e) => /fail(ed)? to attach/i.test(message(e));
+
 /**
  *   base            the entry's directory (import.meta.dirname); the
  *                   objects are loaded from ../bin next to it
  *   ports           capture only these ports (local or remote); empty = everything
+ *   hooks           "auto" (fentry, or kprobes where fentry cannot attach),
+ *                   or "fentry" / "kprobe" to force one build
  *   onTransaction   (tx) for every decoded request/response pair
  *   onPid           (pid) for every captured record, so a short-lived
  *                   process can be named while it still exists
  *   onError         (error) for faults that cost a record, not the run
  *   bodyLimit       bytes of each body kept in memory
  */
-export async function startCapture({ base, ports = [], onTransaction, onPid, onError, bodyLimit = 2048 }) {
+export async function startCapture({ base, ports = [], hooks = "auto", onTransaction, onPid, onError, bodyLimit = 2048 }) {
+  if (!HOOKS.includes(hooks)) throw new Error(`hooks must be one of ${HOOKS.join(", ")}, not "${hooks}"`);
   const spec = (file) => ({ exe: `../bin/${file}`, base });
 
   /* ---- inventory ---- */
@@ -84,24 +102,52 @@ export async function startCapture({ base, ports = [], onTransaction, onPid, onE
     },
   });
 
-  /* ---- socket tap ---- */
-  const socket = await attachSocket(spec("socket.bpf.o"), {
-    onData: (r) => {
-      onPid?.(r.pid);
-      if (r.transport === TRANSPORT_TCP && r.dir === DIR_WRITE && r.off === 0 && isClientHello(r.data)) {
-        const sni = sniOf(r.data);
-        if (sni && r.saddr) remember(sniByFlow, flowKey(r), { sni, pid: r.pid, at: r.at, daddr: r.daddr, dport: r.dport });
+  /* ---- socket tap, which also picks the build every tap uses ----
+   *
+   * Decided once, here: whether an fentry attaches is a property of the
+   * kernel, and every TLS tap carries the same two socket hooks, so what
+   * the socket tap finds holds for all of them. Only an attach failure
+   * falls back. Anything else (a missing object, a verifier rejection)
+   * would fail the kprobe build too, and is reported as it is. */
+  const attachAs = (kind) =>
+    attachSocket(spec(BUILDS[kind].socket), {
+      onData: (r) => {
+        onPid?.(r.pid);
+        if (r.transport === TRANSPORT_TCP && r.dir === DIR_WRITE && r.off === 0 && isClientHello(r.data)) {
+          const sni = sniOf(r.data);
+          if (sni && r.saddr) remember(sniByFlow, flowKey(r), { sni, pid: r.pid, at: r.at, daddr: r.daddr, dport: r.dport });
+        }
+        decoder.push(r);
+      },
+      onError,
+    });
+  let kind = hooks === "auto" ? "fentry" : hooks;
+  let hooksNote = hooks === "auto" ? null : "forced";
+  let socket;
+  try {
+    try {
+      socket = await attachAs(kind);
+    } catch (first) {
+      if (hooks !== "auto" || !isAttachFailure(first)) throw first;
+      kind = "kprobe";
+      hooksNote = "fentry cannot attach on this kernel";
+      try {
+        socket = await attachAs(kind);
+      } catch (second) {
+        throw new Error(`the socket tap would not attach. fentry: ${message(first)}. kprobe fallback: ${message(second)}`);
       }
-      decoder.push(r);
-    },
-    onError,
-  });
+    }
+  } catch (error) {
+    clearInterval(inventoryTimer);
+    throw error;
+  }
   if (ports.length) for (const p of ports) await socket.focusPort(p);
   else await socket.captureAll(true);
 
   /* ---- TLS taps, attached per binary (inode), not per pid ---- */
   const tls = new Map(); // dev:inode -> { path, label, pids:Set, state, taps, error }
-  const objects = { openssl: spec("ssl.bpf.o"), openssl_ex: spec("ssl_ex.bpf.o"), rustls: spec("rustls.bpf.o") };
+  const build = BUILDS[kind];
+  const objects = { openssl: spec(build.openssl), openssl_ex: spec(build.openssl_ex), rustls: spec(build.rustls) };
 
   const scanTls = async () => {
     const r = await yeet.graph.query(BINARIES).catch(() => null);
@@ -153,6 +199,10 @@ export async function startCapture({ base, ports = [], onTransaction, onPid, onE
   const sweep = setInterval(() => decoder.sweep(30_000), 10_000);
 
   return {
+    /** Which build the taps run: "fentry" or "kprobe". */
+    hooks: kind,
+    /** Why it is not the default fentry, or null: "forced", or the fallback's reason. */
+    hooksNote,
     /** Listening TCP ports: Map port -> { port, pid, comm, laddr }. */
     listeners: () => listeners,
     /** The last socket inventory rows. */

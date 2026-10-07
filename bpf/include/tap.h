@@ -14,6 +14,7 @@
 #pragma once
 
 #include "events.h"
+#include "hooks.h"
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -53,7 +54,7 @@ struct {
  * thread about to call tcp_sendmsg on that connection's socket (for a
  * socket BIO, inside the same call; for a memory BIO, on the same tick),
  * and the thread inside SSL_read is the one calling tcp_recvmsg. So the
- * tap notes (thread → conn) on the way in, and an fentry on the two
+ * tap notes (thread → conn) on the way in, and a hook on the two
  * socket calls turns the next hit on that thread into a (conn → socket)
  * binding, emitted once per connection.
  *
@@ -108,18 +109,19 @@ static __always_inline void peer_hit(struct sock *sk)
     bpf_ringbuf_submit(e, 0);
 }
 
-/* Kernel-global, BTF-typed, and auto-attached with the object. Only the
- * first argument is read, so the declaration holds across kernels that
- * changed the rest of the signature. */
-SEC("fentry/tcp_sendmsg")
-int BPF_PROG(peer_sendmsg, struct sock *sk)
+/* Kernel-global and auto-attached with the object: fentry, or a kprobe in
+ * the _kp builds (see hooks.h). Only the first argument is read, so the
+ * declaration holds across kernels that changed the rest of the
+ * signature. */
+HOOK_ENTRY(tcp_sendmsg)
+int HOOK_PROG(peer_sendmsg, struct sock *sk)
 {
     peer_hit(sk);
     return 0;
 }
 
-SEC("fentry/tcp_recvmsg")
-int BPF_PROG(peer_recvmsg, struct sock *sk)
+HOOK_ENTRY(tcp_recvmsg)
+int HOOK_PROG(peer_recvmsg, struct sock *sk)
 {
     peer_hit(sk);
     return 0;

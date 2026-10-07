@@ -18,8 +18,9 @@ import { BpfObject, DataSec, HashMap, RingBuf } from "yeet:bpf";
 import { dataRecord } from "./records.js";
 
 /* libbpf names the data-section map after the object file up to its
- * first dot, truncated to 8 characters: socket.bpf.o → socket.bss. */
-const BSS = "socket.bss";
+ * first dot, truncated to 8 characters: socket.bpf.o → socket.bss, and
+ * the kprobe build sock_kp.bpf.o → sock_kp.bss. */
+const bssOf = (exe) => `${String(exe).split("/").pop().split(".")[0].slice(0, 8)}.bss`;
 
 /**
  * Attach the socket tap. `object` is `{ exe, base? }` as BpfObject takes
@@ -28,6 +29,7 @@ const BSS = "socket.bss";
  * captured whatever the filter says — pass the tool's own ports.
  */
 export async function attachSocket(object, { onData, onError, ignorePorts = [] } = {}) {
+  const BSS = bssOf(object.exe);
   const control = await new BpfObject(object)
     .bind("frames", { kind: "ringbuf", btf_struct: "data_event" })
     .bind("focus_pids", { kind: "hash_map" })

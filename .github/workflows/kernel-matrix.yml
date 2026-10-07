@@ -9,10 +9,15 @@ name: kernel-matrix
 #
 # apiwatch links one object per bpf/<name>/ directory: socket (fentry on
 # tcp_sendmsg/tcp_recvmsg) and the TLS taps (ssl, ssl_ex, rustls), because a
-# uprobe tap must load independently of the kernel-global probes. The
-# matrix therefore has a row per (object, program): peer_sendmsg and
-# peer_recvmsg recur in every TLS tap, so a bare program name would not be
-# unique. The objects and their loaders come from yeet-src/httpscope.
+# uprobe tap must load independently of the kernel-global probes. Each also
+# has a kprobe build from the same source (sock_kp, ssl_kp, sslex_kp,
+# rustl_kp; see bpf/include/hooks.h), which apiwatch falls back to where
+# fentry cannot attach (arm64 before 6.4). veristat loads programs but does
+# not attach them, so this matrix shows both builds load; it cannot show
+# which one a given kernel can attach. The matrix has a row per (object,
+# program): every program name recurs across the two builds, and
+# peer_sendmsg/peer_recvmsg across the TLS taps, so a bare program name would
+# not be unique. The objects and their loaders come from yeet-src/httpscope.
 #
 # Tune `matrix.kernel` to the kernel lines your script must support (`6.6`,
 # `bpf-next`, …); available lines live at

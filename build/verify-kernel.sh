@@ -8,7 +8,8 @@
 #   sh build/verify-kernel.sh [bpf-object ...]   (default: bin/*.bpf.o)
 #
 # apiwatch links one object per bpf/<name>/ directory (socket, ssl, ssl_ex,
-# rustls), so the default is the whole set:
+# rustls, and their kprobe builds sock_kp, ssl_kp, sslex_kp, rustl_kp), so
+# the default is the whole set:
 # veristat takes several objects in one run and names the file in each row.
 #
 # Set OUT_CSV=<path> to also write a machine-readable result (file,prog,verdict,
