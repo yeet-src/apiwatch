@@ -7,12 +7,18 @@ name: kernel-matrix
 # QEMU/KVM on the runner. Each job writes a detail table to its step summary and
 # uploads its result; the final `matrix` job pivots them into one ✅/❌ grid.
 #
-# apiwatch links one object per bpf/<name>/ directory: socket (fentry on
-# tcp_sendmsg/tcp_recvmsg) and the TLS taps (ssl, ssl_ex, rustls), because a
+# apiwatch links one object per bpf/<name>/ directory: socket (kprobes on
+# tcp_sendmsg/tcp_recvmsg and a kretprobe on tcp_recvmsg) and the TLS taps
+# (ssl, ssl_ex, rustls: uprobes on the library, plus kprobes on
+# tcp_sendmsg/tcp_recvmsg to find each connection's socket), because a
 # uprobe tap must load independently of the kernel-global probes. The
 # matrix therefore has a row per (object, program): peer_sendmsg and
 # peer_recvmsg recur in every TLS tap, so a bare program name would not be
 # unique. The objects and their loaders come from yeet-src/httpscope.
+#
+# The kernel hooks are kprobes rather than fentry because fentry cannot
+# attach on arm64 before 6.4. veristat loads programs but does not attach
+# them, so this matrix would not catch an attach failure like that one.
 #
 # Tune `matrix.kernel` to the kernel lines your script must support (`6.6`,
 # `bpf-next`, …); available lines live at

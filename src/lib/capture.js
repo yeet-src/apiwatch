@@ -2,7 +2,7 @@
  *
  * Three sources, one decoder:
  *
- *   socket tap   fentry on tcp_sendmsg/tcp_recvmsg (bin/socket.bpf.o):
+ *   socket tap   kprobes on tcp_sendmsg/tcp_recvmsg (bin/socket.bpf.o):
  *                plaintext HTTP/1.x and h2c on any port, both ends of a
  *                loopback hop, plus the ClientHello of every TLS call
  *   TLS taps     uprobes on SSL_read/SSL_write (+ _ex) and rustls, attached
