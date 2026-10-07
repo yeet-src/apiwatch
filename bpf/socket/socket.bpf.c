@@ -97,19 +97,44 @@ struct {
 } active_reads SEC(".maps");
 
 /* struct iov_iter was reshaped in 6.4 (the iovec pointer became `__iov`,
- * ITER_UBUF was added and the enum renumbered), so every read of it goes
- * through CO-RE against the running kernel. The old spelling needs a
+ * and the enum was renumbered with ITER_UBUF first), so every read of it
+ * goes through CO-RE against the running kernel. The old spelling needs a
  * flavour; the guard is a CO-RE constant, so the branch for the layout
  * we did not load on is pruned before the verifier sees it. */
 struct iov_iter___old {
     const struct iovec *iov;
 };
 
+/* vmlinux.h is generated from the build host's BTF, so a member only one
+ * layout has cannot be named through `struct iov_iter`: built on 6.1 there
+ * is no `__iov` to name. The 6.4 spellings go through this flavour too;
+ * libbpf drops the ___suffix and matches members by name, through the
+ * anonymous unions 6.4 put them in. BTF carries no __user, so `ubuf` is a
+ * plain pointer here. */
+struct iov_iter___new {
+    const struct iovec *__iov;
+    void *ubuf;
+} __attribute__((preserve_access_index));
+
+/* ITER_UBUF the same way: libbpf drops the ___suffix from the enum and its
+ * enumerator, so this resolves against the running kernel's iter_type and
+ * the 0 is never used. ITER_UBUF and `ubuf` came in together (6.1 already
+ * has both), so this one guard also covers the `ubuf` read. */
+enum iter_type___new {
+    ITER_UBUF___new = 0,
+};
+
+static __always_inline int iter_is_ubuf(__u8 type)
+{
+    return bpf_core_enum_value_exists(enum iter_type___new, ITER_UBUF___new) &&
+           type == bpf_core_enum_value(enum iter_type___new, ITER_UBUF___new);
+}
+
 static __always_inline const struct iovec *iter_iov(struct iov_iter *it)
 {
     if (bpf_core_field_exists(struct iov_iter___old, iov))
         return BPF_CORE_READ((struct iov_iter___old *) it, iov);
-    return BPF_CORE_READ(it, __iov);
+    return BPF_CORE_READ((struct iov_iter___new *) it, __iov);
 }
 
 static __always_inline struct iov_iter *msg_iter(struct msghdr *msg)
@@ -130,8 +155,8 @@ static __always_inline int iter_first(struct msghdr *msg, __u64 *base, __u64 *le
     __u8 type = BPF_CORE_READ(it, iter_type);
     __u64 skip = BPF_CORE_READ(it, iov_offset);
 
-    if (type == bpf_core_enum_value(enum iter_type, ITER_UBUF)) {
-        *base = (__u64) BPF_CORE_READ(it, ubuf) + skip;
+    if (iter_is_ubuf(type)) {
+        *base = (__u64) BPF_CORE_READ((struct iov_iter___new *) it, ubuf) + skip;
         *len = BPF_CORE_READ(it, count);
         return *base != 0;
     }
@@ -166,8 +191,9 @@ int BPF_PROG(on_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
     struct iov_iter *it = msg_iter(msg);
     __u8 type = BPF_CORE_READ(it, iter_type);
 
-    if (type == bpf_core_enum_value(enum iter_type, ITER_UBUF)) {
-        emit_data(&frames, (__u64) sk, (__u64) BPF_CORE_READ(it, ubuf), (__u32) BPF_CORE_READ(it, count),
+    if (iter_is_ubuf(type)) {
+        emit_data(&frames, (__u64) sk, (__u64) BPF_CORE_READ((struct iov_iter___new *) it, ubuf),
+                  (__u32) BPF_CORE_READ(it, count),
                   DIR_WRITE, TRANSPORT_TCP, sk, 0);
         return 0;
     }

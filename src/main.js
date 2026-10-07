@@ -128,11 +128,17 @@ async function discover() {
   const rows = [...apis.byKey.values()].filter((a) => ![...a.procs].every(isSelf) || a.procs.size === 0).map((a) => apis.row(a));
   const served = rows.filter((r) => r.kind === "served").sort((a, b) => a.port - b.port);
   const called = rows.filter((r) => r.kind === "called").sort((a, b) => b.requests - a.requests);
+  const localOnly = (addr) => /^(127\.|::1$|0:0:0:0:0:0:0:1$)/.test(addr ?? "");
+  for (const r of served) {
+    const l = listeners.get(r.port);
+    r.address = l?.laddr ?? null;
+    r.reachableFrom = l ? (localOnly(l.laddr) ? "this machine only" : "the network") : null;
+  }
   const servedPorts = new Set(served.map((r) => r.port));
   const quiet = [...listeners.values()]
     .filter((l) => !servedPorts.has(l.port) && !isSelf(l.pid))
     .sort((a, b) => a.port - b.port)
-    .map((l) => ({ port: l.port, address: l.laddr, process: name(l.pid), exposed: !/^(127\.|::1$|0:0:0:0:0:0:0:1$)/.test(l.laddr) }));
+    .map((l) => ({ port: l.port, address: l.laddr, process: name(l.pid), reachableFrom: localOnly(l.laddr) ? "this machine only" : "the network" }));
   const calledHosts = new Set(called.map((c) => c.host));
   const opaqueBy = new Map();
   for (const u of unreadable) {
@@ -167,7 +173,7 @@ async function discover() {
   out("Served by this machine");
   if (!served.length) out("  (none seen)");
   for (const r of served) {
-    out(`  ${r.name}  port ${r.port}  ${r.requests} requests  ${codes(r.statuses)}`);
+    out(`  ${r.name}  port ${r.port}${r.address ? ` on ${r.address} (${r.reachableFrom})` : ""}  ${r.requests} requests  ${codes(r.statuses)}`);
     if (r.endpoints.length) out(`      ${eps(r)}`);
     if (r.callers.length) out(`      called by ${r.callers.join(", ")}`);
   }
@@ -183,7 +189,7 @@ async function discover() {
   }
   if (quiet.length) {
     out("\nListening, but no HTTP seen in the window");
-    for (const q of quiet) out(`  port ${q.port} (${q.address})  ${q.process}${q.exposed ? "" : "  local only"}`);
+    for (const q of quiet) out(`  port ${q.port} on ${q.address} (${q.reachableFrom})  ${q.process}`);
   }
   out(`\nTLS read through: ${tls.filter((t) => t.state === "attached").map((t) => `${t.path} [${t.taps.join(",")}]`).join("; ") || "nothing"}`);
   if (errors.length) out(`Capture errors (${errors.length}): ${errors.slice(0, 3).join(" | ")}`);
