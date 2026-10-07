@@ -7,11 +7,12 @@ name: kernel-matrix
 # QEMU/KVM on the runner. Each job writes a detail table to its step summary and
 # uploads its result; the final `matrix` job pivots them into one ✅/❌ grid.
 #
-# httpscope links one object per bpf/<name>/ directory — socket, wire, walk,
-# and the TLS taps (ssl, ssl_ex, gotls, gotls_read, rustls) — because a uprobe
-# tap must load independently of the kernel-global probes. The matrix therefore
-# has a row per (object, program): peer_sendmsg/peer_recvmsg recur in every TLS
-# tap, so a bare program name would not be unique.
+# apiwatch links one object per bpf/<name>/ directory: socket (fentry on
+# tcp_sendmsg/tcp_recvmsg) and the TLS taps (ssl, ssl_ex, rustls), because a
+# uprobe tap must load independently of the kernel-global probes. The
+# matrix therefore has a row per (object, program): peer_sendmsg and
+# peer_recvmsg recur in every TLS tap, so a bare program name would not be
+# unique. The objects and their loaders come from yeet-src/httpscope.
 #
 # Tune `matrix.kernel` to the kernel lines your script must support (`6.6`,
 # `bpf-next`, …); available lines live at
@@ -21,23 +22,11 @@ name: kernel-matrix
 # filename by stripping a trailing *numeric* build stamp, so a `-main` tag
 # yields a name that doesn't match the file `lvh` actually unpacks and the run
 # dies with "invalid reference format". So each job looks up the newest
-# date-stamped tag (`<ver>-YYYYMMDD.HHMMSS`, which the action handles) — always
-# tracking the latest build, with no tag to bump and immune to quay's pruning of
-# old stamps.
+# date-stamped tag (`<ver>-YYYYMMDD.HHMMSS`, which the action handles).
 #
-# The floor is 6.6: the wire tap attaches with TCX, which 6.1 refuses at load
-# (zero instructions verified), and every other object loads on 6.1 — the
-# legacy socket tap names `iov_iter.__iov` (6.4+) but its reads are CO-RE
-# guarded, so that 6.4 floor is for the build host only, where vmlinux.h is
-# generated from the runner's own BTF by `make bpf`. So the gating lines are
-# the LTS and stable kernels from 6.6 up. bpf-next is run but does not gate:
-# it is a moving target, and what it shows tends to arrive in stable soon
-# after. Case in point: the walk VM's three nested bpf_loops verified in 14k
-# instructions until 7.2.7 backported a batch of verifier precision fixes
-# for bpf_loop callbacks ("backtracking shouldn't clear outer frame R1-R5
-# for callbacks" and kin), after which the same object cost 850k in `step`
-# alone and hit the 1M limit on 7.2.8 and on bpf-next. Its state now lives
-# in a per-CPU map the verifier does not track, and it verifies in under 5k.
+# 6.1 is in the matrix because apiwatch has no TCX object: httpscope found the
+# socket tap's iov_iter reads CO-RE guarded and every non-TCX object loading
+# there. bpf-next is run but does not gate.
 
 on:
   workflow_dispatch:
@@ -57,6 +46,7 @@ jobs:
         # Kernel lines to verify. Each is resolved to its newest date-stamped
         # lvh image at run time (see the header).
         kernel:
+          - '6.1'
           - '6.6'
           - '6.12'
           - '6.18'

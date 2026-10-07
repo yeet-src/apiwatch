@@ -146,7 +146,11 @@ export async function startCapture({ base, ports = [], onTransaction, onPid, onE
 
   /* ---- clocks ---- */
   const tick = setInterval(() => decoder.tick(), 25);
-  const sweep = setInterval(() => decoder.sweep(90_000), 30_000);
+  /* The socket tap never sees a close, so a finished connection's parser
+   * state lives until it idles out. Thirty seconds keeps that small on a
+   * box that opens a connection per request; a keep-alive connection that
+   * wakes up later is simply sniffed again. */
+  const sweep = setInterval(() => decoder.sweep(30_000), 10_000);
 
   return {
     /** Listening TCP ports: Map port -> { port, pid, comm, laddr }. */

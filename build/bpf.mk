@@ -39,7 +39,7 @@ BPF_OUT  := bin/app.bpf.o
 # its own loadable object, bin/<name>.bpf.o, linked from the units inside
 # it. This is for programs that cannot share an object: start() rejects an
 # object with an unattached uprobe, so a tap on a library that a target may
-# not have (bpf/ssl, bpf/gotls, …) must load and attach independently of
+# not have (bpf/ssl, bpf/rustls, …) must load and attach independently of
 # the kernel-global probes in bpf/socket. The JS side loads these from the
 # project's bin/ by relative path (app/lib/probes/objects.js).
 BPF_DIRS       := $(patsubst bpf/%/,%,$(filter-out bpf/include/,$(wildcard bpf/*/)))

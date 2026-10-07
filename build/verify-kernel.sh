@@ -7,8 +7,8 @@
 #
 #   sh build/verify-kernel.sh [bpf-object ...]   (default: bin/*.bpf.o)
 #
-# httpscope links one object per bpf/<name>/ directory (socket, wire, walk,
-# ssl, ssl_ex, gotls, gotls_read, rustls), so the default is the whole set:
+# apiwatch links one object per bpf/<name>/ directory (socket, ssl, ssl_ex,
+# rustls), so the default is the whole set:
 # veristat takes several objects in one run and names the file in each row.
 #
 # Set OUT_CSV=<path> to also write a machine-readable result (file,prog,verdict,
