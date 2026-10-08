@@ -110,7 +110,8 @@ async function testAlert() {
 async function boot() {
   const errors = [];
   let apis = null;
-  const capture = await startCapture({
+  let capture = null;
+  capture = await startCapture({
     base: import.meta.dirname,
     ports: portsArg,
     /* Enough of each body that a compressed one can be decoded whole; an
@@ -119,7 +120,13 @@ async function boot() {
     onPid: (pid) => {
       if (!known(pid)) describe(pid);
     },
-    onTransaction: (tx) => apis.observe(tx),
+    /* The tool's own plumbing is not one of the host's APIs: the daemon
+     * serving this service's /events route, and anyone reading it. */
+    onTransaction: (tx) => {
+      if (SELF_COMMS.has(known(tx.pid)?.comm)) return;
+      if (tx.role === "client" && SELF_COMMS.has(capture?.listeners().get(tx.flow?.dport)?.comm)) return;
+      apis.observe(tx);
+    },
     onError: (e) => {
       if (errors.length < 50) errors.push(describeError(e));
     },
