@@ -92,13 +92,13 @@ make -C ~/.local/share/apiwatch
 yeet service new apiwatch -C ~/.local/share/apiwatch -R always
 yeet service unit add apiwatch/watch -I ~/.local/share/apiwatch/src/main.js -- --watch --slack "#api-alerts" --name "$(hostname)"
 yeet service unit add apiwatch/web -W http://127.0.0.1:9470
-yeet service mount apiwatch/web -L /log -t watch -p console
+yeet service mount apiwatch/web -L /events -t watch -p console
 yeet service enable apiwatch
 yeet service start apiwatch
-curl -sN http://127.0.0.1:9470/log   # the watcher's JSON lines, streamed as they happen
+curl -sN http://127.0.0.1:9470/events   # the watcher's JSON lines, streamed as they happen
 ```
 
-The `web` unit and the `/log` route serve the watcher's console over plain HTTP: a `GET` gets a chunked `text/plain` body, one JSON line per event, open until you disconnect. Routes on a service's web server answer only while the host is signed in, so on a signed-out host `/log` returns `403` with a "Pair this host" page. `127.0.0.1` keeps it on this machine; bind another address only if you mean to share the log.
+The `web` unit and the `/events` route serve the watcher's console over plain HTTP: a `GET` gets a chunked `text/plain` body, one JSON line per event, open until you disconnect. Routes on a service's web server answer only while the host is signed in, so on a signed-out host `/events` returns `403` with a "Pair this host" page. `127.0.0.1` keeps it on this machine. Bind `0.0.0.0` to read it from your laptop, knowing that anyone who can reach the port can read it, and the status lines list every API on the host.
 
 Build it yourself and point the unit at the built checkout. A unit added straight from `gh:yeet-src/apiwatch` is cloned but never built, so it restarts forever on a missing `bin/socket.bpf.o`. Give `-I` an absolute path, since a relative one resolves against wherever you ran the command. The service runs its own copy of the directory, so a `git pull`, a `make` and a restart still run the old code. To update, stop the service, `yeet service unit remove apiwatch/watch`, add the unit again with the same arguments, and start it. Or create the service with `--dev`, which runs the checkout in place so a restart picks up a rebuild (and breaks if you delete the checkout).
 
@@ -289,7 +289,7 @@ Four minutes later the same API reported "users-api 4xx back to normal: 13% of t
 `apiwatch` never draws a screen, so it is safe to pipe, redirect, and run from an agent or a CI job.
 
 - `--discover` prints plain text and exits after `--seconds`. `--discover --json` prints one JSON object with `served`, `called`, `unreadable`, `quiet` and `tls` arrays and the same fields as the text.
-- `--watch` prints JSON lines on stdout until stopped. As a service with the `/log` route, `curl -sN http://127.0.0.1:9470/log` streams them; without the route, `yeet attach -c <isolate id>` does, the id from `yeet service tree apiwatch`. Either way you see only lines printed after you connect, which is why `status` repeats every minute: connect at any time and one arrives within a minute.
+- `--watch` prints JSON lines on stdout until stopped. As a service with the `/events` route, `curl -sN http://127.0.0.1:9470/events` streams them; without the route, `yeet attach -c <isolate id>` does, the id from `yeet service tree apiwatch`. Either way you see only lines printed after you connect, which is why `status` repeats every minute: connect at any time and one arrives within a minute.
 - `--test-alert` exits non-zero and prints the reason when the host isn't signed in or Slack refuses the post, so it works as a check in a script.
 
 To verify an install, run `--discover --seconds 30` with something generating HTTP, as in [Try it without real traffic](#try-it-without-real-traffic), and look for that port in the served list.
