@@ -270,7 +270,8 @@ async function watch() {
       blocks.push({ type: "divider" });
     }
     blocks.pop();
-    blocks.push(batch[0].blocks[2]);
+    /* The footer (host, time) is each message's last block. */
+    blocks.push(batch[0].blocks[batch[0].blocks.length - 1]);
     return { title, text: `${title}: ${batch.map((m) => m.title).join("; ")}`, blocks };
   };
 
