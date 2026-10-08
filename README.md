@@ -11,7 +11,7 @@
 
 <!-- <p align="center"><img src="assets/apiwatch.gif" width="820" alt="apiwatch --discover listing the APIs a test box serves and calls"></p> -->
 
-**`apiwatch` is an eBPF API watchdog for Linux: it lists every HTTP API a machine serves and calls, from live traffic, and messages Slack when one starts failing.**
+**`apiwatch` is an eBPF API watchdog for Linux: it lists every HTTP API a machine serves and calls, from live traffic, and messages Slack with the failing request when one breaks.**
 
 ## Quick start
 
@@ -66,6 +66,10 @@ The thresholds `--watch` uses, and why each default is what it is:
 | `--down-after` | `5` | Seconds a served port must be gone before "stopped listening" fires, so a restart doesn't page you. |
 | `--ignore` | none | APIs never to alert on, by name, host or port: `--ignore httpbin.org,8082`. |
 | `--ports` | all | Capture only these ports, filtered in the kernel. Also watches them for going down from the first second, before any traffic is seen. |
+| `--client-errors` | `baseline` | 4xx alerts. `baseline` learns each API's normal 4xx share over its first five minutes and alerts when the last minute is at least three times that and ten points higher, because a 404 for a missing record is normal traffic for many APIs. `all` alerts on any 4xx like a 5xx; `off` never. |
+| `--client-codes` | every 4xx | Count only these statuses as 4xx, e.g. `--client-codes 401,403,429` to watch auth failures and rate limiting and ignore 404s. |
+| `--min-client-errors` | `5` | 4xx answers within the window before a jump can fire, so three 404s on a quiet API are not a spike. |
+| `--bodies` | `redacted` | The failing request and its response in each 5xx and 4xx alert, about 1000 characters each. `redacted` blanks values under secret-looking keys (password, token, api_key, authorization, card, cvv, ssn and similar) in JSON, forms and query strings, plus bearer tokens, JWTs and card numbers anywhere. `raw` sends them as captured; `off` sends method, path and status only. |
 
 ### Slack, once
 
@@ -76,6 +80,8 @@ Messages go out through yeet's own Slack connection rather than a webhook you ma
 
 Then `--test-alert` sends one message through `yeet.alert`. If the host isn't signed in, or the post is refused, it prints why and exits non-zero.
 
+Alerts carry the failing request and response, and like every alert they travel through yeet's servers to Slack. Secret fields are blanked by default; other personal data, an email address for instance, is not. Use `--bodies off` if request bodies must not leave the host.
+
 ### Leave it running as a service
 
 `--watch` belongs in a [yeet service](https://yeet.cx/docs/cli/services?utm_source=github&utm_medium=readme&utm_campaign=apiwatch), which the daemon keeps running after your shell closes, restarts if it dies, and starts again at boot:
@@ -85,9 +91,14 @@ git clone --depth 1 https://github.com/yeet-src/apiwatch ~/.local/share/apiwatch
 make -C ~/.local/share/apiwatch
 yeet service new apiwatch -C ~/.local/share/apiwatch -R always
 yeet service unit add apiwatch/watch -I ~/.local/share/apiwatch/src/main.js -- --watch --slack "#api-alerts" --name "$(hostname)"
+yeet service unit add apiwatch/web -W http://127.0.0.1:9470
+yeet service mount apiwatch/web -L /log -t watch -p console
 yeet service enable apiwatch
 yeet service start apiwatch
+curl -sN http://127.0.0.1:9470/log   # the watcher's JSON lines, streamed as they happen
 ```
+
+The `web` unit and the `/log` route serve the watcher's console over plain HTTP: a `GET` gets a chunked `text/plain` body, one JSON line per event, open until you disconnect. Routes on a service's web server answer only while the host is signed in, so on a signed-out host `/log` returns `403` with a "Pair this host" page. `127.0.0.1` keeps it on this machine; bind another address only if you mean to share the log.
 
 Build it yourself and point the unit at the built checkout. A unit added straight from `gh:yeet-src/apiwatch` is cloned but never built, so it restarts forever on a missing `bin/socket.bpf.o`. Give `-I` an absolute path, since a relative one resolves against wherever you ran the command. The service runs its own copy of the directory, so a `git pull`, a `make` and a restart still run the old code. To update, stop the service, `yeet service unit remove apiwatch/watch`, add the unit again with the same arguments, and start it. Or create the service with `--dev`, which runs the checkout in place so a restart picks up a rebuild (and breaks if you delete the checkout).
 
@@ -142,14 +153,17 @@ Each API is latched: one message when it breaks, one when it recovers (no 5xx fo
 **What's the lightest way to add 5xx alerting to one Linux box without standing up Prometheus, an exporter and Alertmanager?**
 `apiwatch` is one process and one yeet service with no config file; the thresholds are flags. On a test box handling about seven HTTP exchanges a second, the script's JavaScript used about 0.3% of one core over five minutes with its heap between 4 and 9 MiB, and the kernel probes ran for 16 ms in two minutes (about 2 µs per send, under 1 µs per receive), not counting the kernel's own cost of firing a kprobe. That cost grows with how much TCP traffic the box carries, not just HTTP, so on a busy machine give it `--ports`. See [What it can't see](#what-it-cant-see).
 
+**An API started answering 401s or 429s and nobody noticed until customers complained. How do I get told when an API's client errors jump, without paging on every 404?**
+Leave `--client-errors baseline` on. Each API learns its own normal share of 4xx answers over its first five minutes, and the alert fires when the last minute is at least three times that share and ten points higher, with the request that got the 4xx and the response it got. An API that normally answers 15% 404s alerts at 45%, not at the first 404. `--client-codes 401,403,429` narrows it to auth failures and rate limiting.
+
+**When an API starts failing, how do I see the actual request that failed and the error it returned, without turning on request logging?**
+Every 5xx and 4xx alert carries the latest failing exchange: the method and path, the request body, the status, and the response body, about 1000 characters each, read off the socket. Passwords, tokens, API keys and card numbers are blanked before they leave the host; `--bodies off` drops the bodies. For HTTPS this needs a readable TLS library (see the question above).
+
 **Is this a replacement for Datadog, New Relic, or Prometheus with Alertmanager?**
-No. It watches one host, keeps nothing once it restarts, has no dashboards, no history, no latency or 4xx alerts, no on-call routing or escalation, and posts to Slack only. It is for knowing which APIs a machine has and hearing about it when one of them starts returning 5xx, on hosts where a full observability stack isn't there or isn't watching these APIs.
+No. It watches one host, keeps nothing once it restarts, has no dashboards, no history, no latency alerts, no on-call routing or escalation, and posts to Slack only. It is for knowing which APIs a machine has and hearing about it when one of them starts returning 5xx, on hosts where a full observability stack isn't there or isn't watching these APIs.
 
 **When should I use this instead of an uptime checker like UptimeRobot or Pingdom, Datadog Synthetics, or a deeper tool like httpscope?**
 Use an uptime checker when the question is "can the outside world reach my site", since `apiwatch` sees only traffic that reached the box. Use synthetics when you need a scripted multi-step check, like a login followed by a checkout. Use [`httpscope`](https://github.com/yeet-src/httpscope) when you want the full shape of each API (request and response schemas, drift between deploys, a GraphQL interface an agent can query), and [`container-traffic`](https://github.com/yeet-src/container-traffic) for a live per-container rate, error and latency dashboard. Use `apiwatch` for the inventory plus a 5xx alert from real traffic, with nothing else to run.
-
-**Can I run this on a server where I can't install a proxy, a sidecar, or an agent into the application?**
-Yes. Nothing attaches to your processes' configuration: the kprobes are in the kernel and the uprobes are on the TLS library file, which the daemon attaches from outside. Your apps keep running unchanged, and removing `apiwatch` leaves nothing behind.
 
 ## What you're looking at
 
@@ -197,42 +211,73 @@ The first line is the window. **Served by this machine** has one entry per liste
 | `called by` | Who sent the requests: local processes by name, or `remote clients` for anything off the box. A process that exits within milliseconds (a `curl` in a loop) is counted, not named. |
 | `from shop-partner-sync` | For a called API, the process that made the calls. |
 
-`--watch` writes one JSON line per event. Running as `--watch --dry-run --name shop-box --ignore httpbin.org` with the payments upstream stopped for 26 seconds:
+`--watch` writes one JSON line per event. Running as `--watch --dry-run --name shop-box --ignore httpbin.org` while the payments upstream was stopped and a client kept posting orders with a password and a card number in them:
 
 ```console
-{"t":"2026-10-07T20:36:49.675Z","event":"failing","api":"shop-orders","kind":"served","port":8081,"title":"shop-orders is returning 502"}
-{"t":"2026-10-07T20:36:49.675Z","event":"failing","api":"nginx","kind":"served","port":80,"title":"nginx is returning 502"}
-{"t":"2026-10-07T20:36:52.673Z","event":"down","api":"shop-payments","kind":"served","port":8082,"title":"shop-payments stopped listening"}
-{"t":"2026-10-07T20:37:13.672Z","event":"up","api":"shop-payments","kind":"served","port":8082,"title":"shop-payments is listening again"}
-{"t":"2026-10-07T20:39:11.677Z","event":"recovered","api":"shop-orders","kind":"served","port":8081,"title":"shop-orders recovered"}
-{"t":"2026-10-07T20:39:11.677Z","event":"recovered","api":"nginx","kind":"served","port":80,"title":"nginx recovered"}
+{"t":"2026-10-08T17:26:42.577Z","event":"failing","api":"shop-orders","kind":"served","port":8081,"title":"shop-orders is returning 502"}
+{"t":"2026-10-08T17:26:42.577Z","event":"failing","api":"nginx","kind":"served","port":80,"title":"nginx is returning 502"}
+{"t":"2026-10-08T17:26:47.575Z","event":"down","api":"shop-payments","kind":"served","port":8082,"title":"shop-payments stopped listening"}
 ```
 
-The first three landed within six seconds, so they go out as one message. This is the message as Slack would show it, from the same run:
+Those three landed within six seconds, so they go out as one message. This is it as Slack would show it, from the same run:
 
-```text
+````text
 3 APIs broke on shop-box
 shop-orders is returning 502
-  shop-orders (port 8081 on shop-box) answered 5 of 109 requests with a 5xx in the last 60s.
-  Latest: POST /orders → 502 ×5
-  On this host, shop-payments (port 8082) stopped listening at 20:36:47 UTC.
+  shop-orders (port 8081 on shop-box) answered 25 of 82 requests with a 5xx in the last 60s.
+  Latest: POST /orders → 502 ×8
+  On this host, shop-payments (port 8082) stopped listening at 17:26:42 UTC.
+  Latest failing request (secrets redacted)
+  ```POST /orders
+  content-type: application/json
+
+  {"amount":1999,"email":"ana@example.com","card_number":"[redacted]","password":"[redacted]"}```
+  Response
+  ```502 Bad Gateway
+  content-type: application/json
+
+  {"error":"payments unreachable: <urlopen error [Errno 111] Connection refused>"}```
 nginx is returning 502
-  nginx (port 80 on shop-box) answered 7 of 116 requests with a 5xx in the last 60s.
-  Latest: POST /api/orders → 502 ×5, GET /payments/health → 502 ×2
-  On this host, shop-payments (port 8082) stopped listening at 20:36:47 UTC.
+  nginx (port 80 on shop-box) answered 45 of 105 requests with a 5xx in the last 60s.
+  Latest: GET /payments/health → 502 ×4, POST /api/orders → 502 ×4
+  On this host, shop-payments (port 8082) stopped listening at 17:26:42 UTC.
+  Latest failing request (secrets redacted)
+  ```GET /payments/health?region=us&access_token=[redacted]```
+  Response
+  ```502 Bad Gateway
+  content-type: text/html
+
+  <html><head><title>502 Bad Gateway</title></head> …```
 shop-payments stopped listening
   Nothing on shop-box is listening on port 8082 any more (it was shop-payments).
   Every request to it fails until it is back.
-shop-box · 20:36:49 UTC · apiwatch on yeet
-```
+shop-box · 17:26:42 UTC · apiwatch on yeet
+````
 
-Twenty-six seconds later comes "shop-payments is listening again, after 26s down", and two minutes after the last 502 a single "2 APIs recovered on shop-box": "No 5xx from nginx for 2 min. It returned 22 5xx responses over 23s, starting 20:36:48 UTC."
+A 4xx jump, from a Node API that normally answers 15% 404s for users that don't exist, when a client started asking for one that never would:
+
+````text
+users-api 4xx jumped to 52% (404)
+  users-api (port 3000 on users-box) answered 39 of 75 requests with a 4xx in the last 60s (52%), against 15% normally.
+  Latest (sampled): GET /users/{n} → 404 ×8
+  Latest failing request (secrets redacted)
+  ```GET /users/99?api_key=[redacted]```
+  Response
+  ```404 Not Found
+  content-type: application/json
+
+  {"error":"not found"}```
+users-box · 17:28:41 UTC · apiwatch on yeet
+````
+
+Four minutes later the same API reported "users-api 4xx back to normal: 13% of the last 60s, against 15% normally."
 
 | event | when |
 | --- | --- |
 | `start` | The watcher started: host label, channel, whether the host is signed in. |
-| `status` | 20 s and 60 s after start, then every ten minutes: every API being watched with its request and 5xx counts, whether the host is signed in, which TLS libraries are tapped. |
+| `status` | 20 s and 60 s after start, then every ten minutes: every API being watched with its request and 5xx counts, whether the host is signed in, the `--bodies` and `--client-errors` modes, which TLS libraries are tapped. |
 | `failing` | An API crossed `--min-errors` 5xx within `--window`. |
+| `failing_4xx` / `recovered_4xx` / `reminder_4xx` | An API's 4xx share jumped past its baseline (or, with `--client-errors all`, any 4xx), came back to normal, or is still high after `--remind` seconds. |
 | `down` / `up` | A served port stopped listening for `--down-after` seconds, and came back. |
 | `reminder` | Still failing after `--remind` seconds. |
 | `recovered` | No 5xx for `--recover` seconds. |
@@ -244,7 +289,7 @@ Twenty-six seconds later comes "shop-payments is listening again, after 26s down
 `apiwatch` never draws a screen, so it is safe to pipe, redirect, and run from an agent or a CI job.
 
 - `--discover` prints plain text and exits after `--seconds`. `--discover --json` prints one JSON object with `served`, `called`, `unreadable`, `quiet` and `tls` arrays and the same fields as the text.
-- `--watch` prints JSON lines on stdout until stopped. As a service, read them with `yeet attach -c <isolate id>`, the id from `yeet service tree apiwatch`. Attaching shows only lines printed after you attach, which is why `status` repeats: attach within a minute of starting it and you see one.
+- `--watch` prints JSON lines on stdout until stopped. As a service with the `/log` route, `curl -sN http://127.0.0.1:9470/log` streams them; without the route, `yeet attach -c <isolate id>` does, the id from `yeet service tree apiwatch`. Either way you see only lines printed after you connect, which is why `status` repeats: connect within a minute of starting it and you see one.
 - `--test-alert` exits non-zero and prints the reason when the host isn't signed in or Slack refuses the post, so it works as a check in a script.
 
 To verify an install, run `--discover --seconds 30` with something generating HTTP, as in [Try it without real traffic](#try-it-without-real-traffic), and look for that port in the served list.
@@ -265,7 +310,8 @@ src/
   main.js                 flags, the three modes, output, the Slack queue
   lib/capture.js          loads the taps, keeps the socket inventory, names TLS calls by SNI
   lib/apis.js             transactions → served and called APIs, endpoints, status counts
-  lib/alerts.js           the 5xx window, port-down, latching, recovery and reminders
+  lib/alerts.js           5xx, the 4xx baseline, port-down, latching, recovery and reminders
+  lib/bodies.js           the request and response an alert shows, redacted
   lib/procs.js            pid → systemd unit, container, script or command
   lib/sni.js              the hostname in a TLS ClientHello
   lib/path.js             /users/42 → /users/{n}
@@ -306,8 +352,9 @@ So both spellings go through local flavors, `struct iov_iter___old { iov }` and 
 | --- | --- |
 | `lib/http/decoder.js` | One entry per connection. Decides from the first bytes whether it carries HTTP/1, the HTTP/2 preface, a TLS record or something else, holds records 20 ms to put them back in kernel-timestamp order, pairs requests with responses, and accounts for bytes the copy missed so a gap costs a body, not the framing. |
 | `lib/http/h1.js`, `h2.js`, `hpack.js` | HTTP/1.x (content-length, chunked, pipelining) and HTTP/2 frames with HPACK header decoding. |
-| `lib/apis.js` | Keys each transaction to an API: served by local port, called by `Host`. Drops the client side of a loopback hop into the served API's caller list. |
-| `lib/alerts.js` | Per-API state: `ok`, `failing`, `down`. Only transitions and reminders produce messages. |
+| `lib/apis.js` | Keys each transaction to an API: served by local port, called by `Host`. Drops the client side of a loopback hop into the served API's caller list. Keeps request and 4xx counts in 10-second buckets for about half an hour, the baseline's memory, and the latest failing exchange of each class. |
+| `lib/alerts.js` | Per-API state: `ok`, `failing`, `down` for 5xx and ports, and a separate `ok`/`failing` for 4xx with the baseline frozen while it fires. Only transitions and reminders produce messages. |
+| `lib/bodies.js` | The exchange an alert shows: inflates gzip, deflate and brotli bodies through `yeet:compression`, cuts each to about 1000 characters, and redacts by key name in JSON, forms and query strings and by shape (bearer tokens, JWTs, Luhn-valid card numbers) everywhere else. Headers other than the content type are never shown. |
 | `lib/procs.js` | Names a pid from its cgroup and command line, looked up the moment its first byte is captured, before a short-lived process can exit. |
 | `lib/capture.js` | Polls the socket inventory every 2 s for listeners, rescans for TLS libraries every 60 s, and records the SNI of each ClientHello so an unreadable call still has a name. |
 
@@ -366,7 +413,10 @@ yeet run . -- --discover --seconds 25
 - **HTTP/3.** QUIC runs over UDP, which these hooks never see.
 - **gRPC failures that arrive as HTTP 200.** gRPC reports its own errors in a `grpc-status` trailer on a 200 response, which `apiwatch` does not treat as an error. [`grpcsnoop`](https://github.com/yeet-src/grpcsnoop) decodes gRPC calls and their messages.
 - **Failures with no HTTP response.** A called API that refuses the connection, times out, or never answers produces no status code, so it is not alerted on as that API. If your app turns it into a 5xx, that is what you'll hear about.
-- **Slowness, 4xx, and silence.** Alerts are 5xx and port-down only. A latency spike, a run of 404s, or an API whose traffic stops (while its port stays up) does not alert.
+- **Slowness and silence.** A latency spike, or an API whose traffic stops while its port stays up, does not alert.
+- **A 4xx jump in the first five minutes.** The baseline needs five minutes and 50 requests of an API before it can tell a jump from normal, and it restarts from nothing when the watcher does. `--client-errors all` alerts from the first second, on every 4xx.
+- **Every secret.** Redaction goes by key names and recognisable shapes. A secret under an innocent key (`{"note":"my password is …"}`), a free-text body, or personal data such as names and email addresses goes through as captured. Use `--bodies off` where that matters.
+- **Bodies of HTTPS it cannot read**, which is Go and other unhookable TLS stacks, and bodies over about 32 KiB, which arrive cut. Alerts for those APIs still fire, with whatever was captured.
 - **Anything before it started.** State lives in memory: discovery sees only its window, and a restarted watcher starts from zero, so a port that was already down when it started is unknown until you name it with `--ports`.
 - **The cost of capturing everything.** Without `--ports` the socket tap copies every TCP call on the box, not just HTTP, and the decoder discards what isn't. That is cheap on an API server and expensive on a database or a file server pushing gigabytes. Use `--ports` there.
 - **Every read under heavy concurrency.** A kretprobe has a fixed pool of in-flight instances, so when more threads sit in `tcp_recvmsg` at once than the pool holds, some reads are skipped. A skipped read is never recorded as a wrong one.
