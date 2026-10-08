@@ -310,10 +310,11 @@ async function watch() {
     alerts.check();
   }, 1000);
 
-  /* What is being watched, 20 s and 60 s after start and then every ten
-   * minutes, so whoever attaches to the service log (which shows only
-   * what is printed after they attach) sees that capture is alive and
-   * whether alerts can be delivered. */
+  /* What is being watched, 20 s after start and then every minute, so
+   * whoever connects to the log (which shows only what is printed after
+   * they connect) sees within a minute that capture is alive and whether
+   * alerts can be delivered. An agent that takes a while between starting
+   * the service and reading its log must not land in a silent gap. */
   const status = async () => {
     await Promise.all([...apis.pids()].map((p) => describe(p)));
     const list = apis.list().filter((r) => r.requests > 0);
@@ -333,8 +334,7 @@ async function watch() {
     });
   };
   setTimeout(status, 20_000);
-  setTimeout(status, 60_000);
-  setInterval(status, 600_000);
+  setInterval(status, 60_000);
 }
 
 /* ---------------------------------------------------------------- */

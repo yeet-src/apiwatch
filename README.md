@@ -275,7 +275,7 @@ Four minutes later the same API reported "users-api 4xx back to normal: 13% of t
 | event | when |
 | --- | --- |
 | `start` | The watcher started: host label, channel, whether the host is signed in. |
-| `status` | 20 s and 60 s after start, then every ten minutes: every API being watched with its request and 5xx counts, whether the host is signed in, the `--bodies` and `--client-errors` modes, which TLS libraries are tapped. |
+| `status` | 20 s after start, then every minute: every API being watched with its request and 5xx counts, whether the host is signed in, the `--bodies` and `--client-errors` modes, which TLS libraries are tapped. |
 | `failing` | An API crossed `--min-errors` 5xx within `--window`. |
 | `failing_4xx` / `recovered_4xx` / `reminder_4xx` | An API's 4xx share jumped past its baseline (or, with `--client-errors all`, any 4xx), came back to normal, or is still high after `--remind` seconds. |
 | `down` / `up` | A served port stopped listening for `--down-after` seconds, and came back. |
@@ -289,7 +289,7 @@ Four minutes later the same API reported "users-api 4xx back to normal: 13% of t
 `apiwatch` never draws a screen, so it is safe to pipe, redirect, and run from an agent or a CI job.
 
 - `--discover` prints plain text and exits after `--seconds`. `--discover --json` prints one JSON object with `served`, `called`, `unreadable`, `quiet` and `tls` arrays and the same fields as the text.
-- `--watch` prints JSON lines on stdout until stopped. As a service with the `/log` route, `curl -sN http://127.0.0.1:9470/log` streams them; without the route, `yeet attach -c <isolate id>` does, the id from `yeet service tree apiwatch`. Either way you see only lines printed after you connect, which is why `status` repeats: connect within a minute of starting it and you see one.
+- `--watch` prints JSON lines on stdout until stopped. As a service with the `/log` route, `curl -sN http://127.0.0.1:9470/log` streams them; without the route, `yeet attach -c <isolate id>` does, the id from `yeet service tree apiwatch`. Either way you see only lines printed after you connect, which is why `status` repeats every minute: connect at any time and one arrives within a minute.
 - `--test-alert` exits non-zero and prints the reason when the host isn't signed in or Slack refuses the post, so it works as a check in a script.
 
 To verify an install, run `--discover --seconds 30` with something generating HTTP, as in [Try it without real traffic](#try-it-without-real-traffic), and look for that port in the served list.
