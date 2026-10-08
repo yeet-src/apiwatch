@@ -132,7 +132,9 @@ export class Alerts {
     const body = api.kind === "served"
       ? `*${row.name}* (port ${api.port} on ${this.host}) answered ${of} requests with a 5xx in the last ${this.window}s.`
       : `*${row.name}* returned a 5xx to ${of} calls from ${row.process ?? this.host} in the last ${this.window}s.`;
-    const related = this.related(api.key);
+    /* Only for an API this box serves: a stopped local port explains a
+     * proxy's 502, and says nothing about a third party's 503. */
+    const related = api.kind === "served" ? this.related(api.key) : null;
     return {
       title: `${row.name} is returning ${codes.length ? codes.join(" and ") : "5xx"}`,
       body: [body, lines.length ? `Latest: ${lines.join(", ")}` : null, related].filter(Boolean).join("\n"),

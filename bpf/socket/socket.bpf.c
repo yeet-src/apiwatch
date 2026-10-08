@@ -1,11 +1,17 @@
 /* The socket tap: plaintext capture at tcp_sendmsg / tcp_recvmsg for the
  * connections you point it at.
  *
- * Everything here is a kernel-global fentry/fexit, so this object always
- * loads — there is no uprobe in it to fail an attach. That is why it is
- * kept apart from the TLS taps (start() rejects an object with an
- * unattached uprobe): a process with no OpenSSL must not be able to take
- * plain-HTTP capture down with it.
+ * Everything here is a kernel-global kprobe/kretprobe, so there is no
+ * uprobe in it to fail an attach. That is why it is kept apart from the
+ * TLS taps (start() rejects an object with an unattached uprobe): a
+ * process with no OpenSSL must not be able to take plain-HTTP capture
+ * down with it.
+ *
+ * Kprobes and not fentry/fexit, because fentry cannot attach on arm64
+ * before 6.4 (no ftrace direct calls there; Graviton on Amazon Linux 2023
+ * is one such machine), and kprobes attach everywhere this runs. The
+ * arguments are then bare registers rather than BTF pointers, so every
+ * read through them is a BPF_CORE_READ or a probe read.
  *
  * tcp_sendmsg carries what a process sends, in the user iovec, at entry;
  * tcp_recvmsg's buffer is filled by return, so the entry stashes the
@@ -89,8 +95,11 @@ struct {
     __uint(max_entries, 1 << 24);
 } frames SEC(".maps");
 
+/* A read's entry, kept per thread until its return. LRU because a
+ * kretprobe can miss a return (see on_recvmsg_exit), and a slot whose
+ * return never ran must not hold the map forever. */
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __type(key, __u64);
     __type(value, struct read_args);
     __uint(max_entries, 10240);
@@ -179,8 +188,8 @@ static __always_inline int iter_first(struct msghdr *msg, __u64 *base, __u64 *le
  * iovec segments (a header block and a body written with one writev),
  * so each segment is emitted on its own and the decoder concatenates
  * per connection. */
-SEC("fentry/tcp_sendmsg")
-int BPF_PROG(on_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
+SEC("kprobe/tcp_sendmsg")
+int BPF_KPROBE(on_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
 {
     if ((long) size <= 0)
         return 0;
@@ -217,9 +226,10 @@ int BPF_PROG(on_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
 
 /* int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, ...):
  * the destination is filled by return. Stash (sk, where the iterator
- * will write, how much room) at entry; the exit reads the return count
- * with the helper — the arity changed in 5.19 — and copies min(ret,
- * room). `flags` rides along so the record can say a read was a peek.
+ * will write, how much room) at entry; a return probe has no arguments
+ * to read, so the exit takes all of that from the stash, reads the count
+ * from the return register, and copies min(ret, room). `flags` rides
+ * along so the record can say a read was a peek.
  *
  * Two things that were wrong here once: the iterator's `iov_offset` was
  * ignored, so a second tcp_recvmsg round inside one syscall re-read the
@@ -227,10 +237,13 @@ int BPF_PROG(on_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
  * -EAGAIN became a huge count capped to the room — a record full of
  * whatever the buffer held before. Both showed up as a response head
  * where curl's body should have been. */
-SEC("fentry/tcp_recvmsg")
-int BPF_PROG(on_recvmsg_enter, struct sock *sk, struct msghdr *msg, size_t len, int flags)
+SEC("kprobe/tcp_recvmsg")
+int BPF_KPROBE(on_recvmsg_enter, struct sock *sk, struct msghdr *msg, size_t len, int flags)
 {
     __u64 id = bpf_get_current_pid_tgid();
+    /* A return the kretprobe missed never cleared its slot. Clear it now,
+     * so this call's return cannot copy from the previous call's buffer. */
+    bpf_map_delete_elem(&active_reads, &id);
     if (!wanted(sk, id >> 32))
         return 0;
     struct read_args a = { .conn = (__u64) sk, .flags = (__u64) (__u32) flags };
@@ -240,19 +253,21 @@ int BPF_PROG(on_recvmsg_enter, struct sock *sk, struct msghdr *msg, size_t len, 
     return 0;
 }
 
-SEC("fexit/tcp_recvmsg")
-int BPF_PROG(on_recvmsg_exit, struct sock *sk)
+/* A kretprobe has a fixed pool of in-flight instances, sized from the
+ * CPU count, so when more threads than that sit in tcp_recvmsg at once
+ * some returns are missed and those reads are not captured. */
+SEC("kretprobe/tcp_recvmsg")
+int BPF_KRETPROBE(on_recvmsg_exit)
 {
     __u64 id = bpf_get_current_pid_tgid();
     struct read_args *a = bpf_map_lookup_elem(&active_reads, &id);
     if (!a)
         return 0;
+    struct sock *sk = (struct sock *) a->conn;
     __u64 buf = a->buf, cap = a->nread, flags = a->flags;
     bpf_map_delete_elem(&active_reads, &id);
 
-    __u64 ret = 0;
-    if (bpf_get_func_ret(ctx, &ret))
-        return 0;
+    __u64 ret = PT_REGS_RC(ctx);
     /* The int return arrives zero-extended: -EAGAIN is 0xfffffff5 here,
      * a very large count, unless it is taken as the int it was. */
     long n = (int) ret;
