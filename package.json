@@ -1,0 +1,8 @@
+{
+  "name": "apiwatch",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/bodies.test.js test/alerts.test.js"
+  }
+}

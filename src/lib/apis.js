@@ -20,6 +20,12 @@ const MAX_RECENT = 8;
 const MAX_CALLERS = 256;
 const RING = 4096; // 5xx timestamps kept per API for the sliding window
 
+/* Request and 4xx counts in 10-second buckets, about 32 minutes of them:
+ * enough to learn what share of an API's answers are normally 4xx, which
+ * a ring of timestamps cannot hold for a busy API. */
+export const BUCKET_MS = 10_000;
+const BUCKETS = 192;
+
 const hostOnly = (h) => {
   const s = String(h ?? "").trim().toLowerCase();
   if (s.startsWith("[")) return s.slice(1, s.indexOf("]"));
@@ -44,8 +50,10 @@ const addCaller = (api, c) => {
 const isIpLiteral = (h) => /^\d+\.\d+\.\d+\.\d+$/.test(h) || h.includes(":");
 
 export class Apis {
-  constructor({ name = (pid) => `pid ${pid}`, info = null, isLocal = () => false, listeners = () => new Map(), callerOf = null } = {}) {
+  constructor({ name = (pid) => `pid ${pid}`, info = null, isLocal = () => false, listeners = () => new Map(), callerOf = null, clientCodes = null } = {}) {
     this.name = name;
+    /* Which 4xx statuses count as client errors; null means all of them. */
+    this.clientCodes = clientCodes && clientCodes.size ? clientCodes : null;
     this.info = info;
     this.callerOf = callerOf;
     this.isLocal = isLocal;
@@ -76,6 +84,9 @@ export class Apis {
         errorTimes: [],
         reqTimes: [],
         recentErrors: [],
+        recent4xx: [],
+        buckets: [],
+        lastTx: {},
         ...init,
       };
       this.byKey.set(key, api);
@@ -131,13 +142,46 @@ export class Apis {
     api.endpoints.set(epKey, ep);
 
     const error = status != null && status >= 500;
-    if (error) {
-      api.errorTimes.push(Date.now());
-      if (api.errorTimes.length > RING) api.errorTimes.splice(0, api.errorTimes.length - RING);
-      api.recentErrors.push({ at: Date.now(), method: tx.method, path, status, reason: tx.reason ?? null, pid: tx.pid });
-      if (api.recentErrors.length > MAX_RECENT) api.recentErrors.shift();
+    const clientError = status != null && status >= 400 && status < 500 && (!this.clientCodes || this.clientCodes.has(status));
+    this.bucket(api, api.lastAt, clientError);
+    if (error || clientError) {
+      const cls = error ? "5xx" : "4xx";
+      if (error) {
+        api.errorTimes.push(api.lastAt);
+        if (api.errorTimes.length > RING) api.errorTimes.splice(0, api.errorTimes.length - RING);
+      }
+      const recent = error ? api.recentErrors : api.recent4xx;
+      recent.push({ at: api.lastAt, cls, method: tx.method, path, status, reason: tx.reason ?? null, pid: tx.pid });
+      if (recent.length > MAX_RECENT) recent.shift();
+      /* The whole exchange of the latest failure of each class, kept so an
+       * alert can show its bodies. One per class, so at most two bodies
+       * per API stay in memory. */
+      api.lastTx[cls] = tx;
     }
-    return { api, error };
+    return { api, error, clientError };
+  }
+
+  bucket(api, at, clientError) {
+    const t = at - (at % BUCKET_MS);
+    let b = api.buckets[api.buckets.length - 1];
+    if (!b || b.t !== t) {
+      api.buckets.push((b = { t, req: 0, c4: 0 }));
+      if (api.buckets.length > BUCKETS) api.buckets.shift();
+    }
+    b.req++;
+    if (clientError) b.c4++;
+  }
+
+  /** Requests and 4xx answers in [from, to). */
+  counts(api, from, to) {
+    let req = 0;
+    let c4 = 0;
+    for (const b of api.buckets) {
+      if (b.t < from || b.t >= to) continue;
+      req += b.req;
+      c4 += b.c4;
+    }
+    return { req, c4 };
   }
 
   /* The pid holding the client end of a loopback connection, from the

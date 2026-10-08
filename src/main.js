@@ -14,6 +14,8 @@ import { startCapture, SELF_COMMS } from "./lib/capture.js";
 import { Apis } from "./lib/apis.js";
 import { Alerts } from "./lib/alerts.js";
 import { describe, known } from "./lib/procs.js";
+import { MODES as BODY_MODES, sampleMrkdwn, sampleOf } from "./lib/bodies.js";
+import { decodeContentEncoding } from "yeet:compression";
 
 const HELP = `apiwatch: the HTTP APIs this machine serves and calls, and a Slack alert when one breaks.
 
@@ -24,6 +26,15 @@ Alert when one breaks (run as a yeet service so it outlives your shell):
   yeet run github:yeet-src/apiwatch -- --watch --slack "#channel" [--name web-1]
       --window 60       seconds of history each check looks at
       --min-errors 1    5xx responses within the window that count as broken
+      --client-errors baseline
+                        4xx alerts: baseline (when an API's 4xx share jumps far above
+                        its own normal, learned over its first 5 min), all, or off
+      --client-codes 401,403,429
+                        count only these 4xx statuses (default: every 4xx)
+      --min-client-errors 5
+                        4xx answers within the window before a jump can fire
+      --bodies redacted the failing request and response in each alert: redacted
+                        (secret fields, tokens and card numbers blanked), raw, or off
       --recover 120     seconds without a 5xx before an API counts as recovered
       --remind 1800     seconds between "still broken" reminders
       --down-after 5    seconds a served port must be gone before it counts as down
@@ -52,6 +63,14 @@ const portsArg = String(arg("ports", "") || "")
 const host = String(arg("name", "") || "this host");
 const channel = arg("slack", null);
 const json = Boolean(arg("json", false));
+const bodies = String(arg("bodies", "redacted"));
+const clientErrors = String(arg("client-errors", "baseline"));
+const clientCodes = new Set(
+  String(arg("client-codes", "") || "")
+    .split(",")
+    .map((c) => Number(c.trim()))
+    .filter((c) => c >= 400 && c < 500),
+);
 
 const out = (line) => console.log(line);
 const jlog = (obj) => console.log(JSON.stringify({ t: new Date().toISOString(), ...obj }));
@@ -94,6 +113,9 @@ async function boot() {
   const capture = await startCapture({
     base: import.meta.dirname,
     ports: portsArg,
+    /* Enough of each body that a compressed one can be decoded whole; an
+     * alert shows at most about 1000 characters of it. */
+    bodyLimit: 16_384,
     onPid: (pid) => {
       if (!known(pid)) describe(pid);
     },
@@ -107,7 +129,7 @@ async function boot() {
     if (row && !known(row.pid)) describe(row.pid);
     return row?.pid ?? null;
   };
-  apis = new Apis({ name, info: known, isLocal: capture.isLocal, listeners: capture.listeners, callerOf });
+  apis = new Apis({ name, info: known, isLocal: capture.isLocal, listeners: capture.listeners, callerOf, clientCodes });
   return { capture, apis, errors };
 }
 
@@ -200,6 +222,8 @@ async function discover() {
 async function watch() {
   const dryRun = Boolean(arg("dry-run", false));
   if (!channel && !dryRun) throw new Error('--watch needs --slack "#channel" (or --dry-run)');
+  if (!BODY_MODES.includes(bodies)) throw new Error(`--bodies must be one of ${BODY_MODES.join(", ")}, not "${bodies}"`);
+  if (!["baseline", "all", "off"].includes(clientErrors)) throw new Error(`--client-errors must be baseline, all or off, not "${clientErrors}"`);
   const window = num("window", 60);
   const { capture, apis, errors } = await boot();
 
@@ -235,12 +259,16 @@ async function watch() {
       .filter(Boolean)
       .join("\n");
   const combine = (batch) => {
-    const broken = batch.filter((m) => m.event === "failing" || m.event === "down" || m.event === "reminder").length;
+    const broken = batch.filter((m) => /^(failing|down|reminder)/.test(m.event)).length;
     const title = broken === batch.length
       ? `${batch.length} APIs broke on ${host}`
       : broken === 0 ? `${batch.length} APIs recovered on ${host}` : `${batch.length} API changes on ${host}`;
     const blocks = [{ type: "header", text: { type: "plain_text", text: title } }];
-    for (const m of batch) blocks.push({ type: "section", text: { type: "mrkdwn", text: `*${m.title}*\n${m.blocks[1].text.text}` } }, { type: "divider" });
+    for (const m of batch.slice(0, 12)) {
+      blocks.push({ type: "section", text: { type: "mrkdwn", text: `*${m.title}*\n${m.blocks[1].text.text}` } });
+      if (m.detail) blocks.push(m.blocks[2]);
+      blocks.push({ type: "divider" });
+    }
     blocks.pop();
     blocks.push(batch[0].blocks[2]);
     return { title, text: `${title}: ${batch.map((m) => m.title).join("; ")}`, blocks };
@@ -257,6 +285,14 @@ async function watch() {
     downAfter: num("down-after", 5),
     ports: portsArg,
     ignore: String(arg("ignore", "") || "").split(",").map((x) => x.trim()).filter(Boolean),
+    clientErrors,
+    minClient: Math.max(1, num("min-client-errors", 5)),
+    sample: (api, cls) => {
+      const tx = api.lastTx?.[cls];
+      if (!tx) return null;
+      const label = bodies === "off" ? "Latest failing request (bodies off)" : `Latest failing request${bodies === "redacted" ? " (secrets redacted)" : ""}`;
+      return sampleMrkdwn(sampleOf(tx, { mode: bodies, inflate: decodeContentEncoding }), label);
+    },
     log: jlog,
     send: (m) => {
       if (queue.length < 50) queue.push(m);
@@ -287,6 +323,8 @@ async function watch() {
       channel,
       dryRun,
       signedIn,
+      bodies,
+      clientErrors,
       transactions: apis.transactions,
       apis: list.map((r) => ({ kind: r.kind, name: r.name, port: r.port, requests: r.requests, errors5xx: r.errors5xx })),
       tls: capture.tlsStatus().filter((t) => t.state === "attached").map((t) => t.path),
